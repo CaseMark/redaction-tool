@@ -8,6 +8,4 @@ export default defineConfig({
   dbCredentials: {
     url: process.env.DATABASE_URL!,
   },
-  // Required for Neon and other cloud databases
-  ssl: true,
 });

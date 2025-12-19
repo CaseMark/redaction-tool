@@ -168,13 +168,16 @@ export async function POST(request: NextRequest) {
     // Generate PDF bytes
     const pdfBytes = await pdfDoc.save();
 
+    // Convert Uint8Array to Buffer for NextResponse
+    const buffer = Buffer.from(pdfBytes);
+
     // Return PDF as downloadable file
-    return new NextResponse(pdfBytes, {
+    return new NextResponse(buffer, {
       status: 200,
       headers: {
         'Content-Type': 'application/pdf',
         'Content-Disposition': `attachment; filename="${filename}"`,
-        'Content-Length': pdfBytes.length.toString(),
+        'Content-Length': buffer.length.toString(),
       },
     });
   } catch (error) {
