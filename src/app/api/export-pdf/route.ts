@@ -1,21 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
-
-interface RedactionEntity {
-  id: string;
-  type: string;
-  value: string;
-  maskedValue: string;
-  startIndex: number;
-  endIndex: number;
-  shouldRedact: boolean;
-}
-
-interface ExportRequest {
-  text: string;
-  entities: RedactionEntity[];
-  filename?: string;
-}
+import { validateRequestBody, ExportPDFRequestSchema } from '@/lib/validation/schemas';
+import { checkRateLimit, rateLimitExceededResponse, addRateLimitHeaders, RateLimits } from '@/lib/security/rate-limit';
 
 /**
  * POST /api/export-pdf - Generate a redacted PDF from text and entities
@@ -24,13 +10,20 @@ interface ExportRequest {
  * applies the redactions, and generates a downloadable PDF.
  */
 export async function POST(request: NextRequest) {
-  try {
-    const body: ExportRequest = await request.json();
-    const { text, entities, filename = 'redacted-document.pdf' } = body;
+  // Rate limiting
+  const rateLimit = checkRateLimit(request, RateLimits.exportPDF, 'export-pdf');
+  if (!rateLimit.allowed) {
+    return rateLimitExceededResponse(rateLimit.resetIn);
+  }
 
-    if (!text) {
-      return NextResponse.json({ error: 'Text is required' }, { status: 400 });
+  try {
+    // Validate request body
+    const validation = await validateRequestBody(request, ExportPDFRequestSchema);
+    if (!validation.success) {
+      return NextResponse.json({ error: validation.error }, { status: 400 });
     }
+
+    const { text, entities, filename } = validation.data;
 
     // Filter entities that should be redacted
     const entitiesToRedact = entities.filter(e => e.shouldRedact);
@@ -172,7 +165,7 @@ export async function POST(request: NextRequest) {
     const buffer = Buffer.from(pdfBytes);
 
     // Return PDF as downloadable file
-    return new NextResponse(buffer, {
+    const response = new NextResponse(buffer, {
       status: 200,
       headers: {
         'Content-Type': 'application/pdf',
@@ -180,14 +173,12 @@ export async function POST(request: NextRequest) {
         'Content-Length': buffer.length.toString(),
       },
     });
+
+    return addRateLimitHeaders(response, rateLimit.remaining, rateLimit.resetIn);
   } catch (error) {
-    console.error('[API] PDF export failed:', error);
-    
+    const message = error instanceof Error ? error.message : 'PDF export failed';
     return NextResponse.json(
-      { 
-        error: 'PDF export failed',
-        details: error instanceof Error ? error.message : 'Unknown error'
-      },
+      { error: 'PDF export failed', details: message },
       { status: 500 }
     );
   }

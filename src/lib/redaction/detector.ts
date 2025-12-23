@@ -13,24 +13,43 @@ import { detectPIIWithRegex, getMaskFunction, EntityType, PatternMatch } from '.
  * This includes non-standard formats, obfuscated data, and contextually identifiable information.
  * 
  * AGGRESSIVE MODE: Better to flag something that might be PII than to miss actual PII.
+ * RETROSPECTIVE AWARENESS: Look for PII where the label comes AFTER the data.
  */
-const CONTEXTUAL_PII_DETECTION_PROMPT = `You are an AGGRESSIVE PII detection expert. Your job is to find ALL potentially sensitive information, even if you're not 100% certain. It's better to flag something that might be PII than to miss actual sensitive data.
+const CONTEXTUAL_PII_DETECTION_PROMPT = `You are an AGGRESSIVE PII detection expert with RETROSPECTIVE AWARENESS. Your job is to find ALL potentially sensitive information, even if you're not 100% certain. It's better to flag something that might be PII than to miss actual sensitive data.
+
+CRITICAL: Look for PII in BOTH directions:
+- FORWARD patterns: "My SSN is 123-45-6789" (label before data)
+- BACKWARD/RETROSPECTIVE patterns: "five one two three four five six seven eight nine is my social" (data before label)
 
 SCAN THOROUGHLY for PII that may be:
-1. Written in non-standard formats (e.g., "SSN: one two three - four five - six seven eight nine")
-2. Obfuscated or partially redacted but still identifiable
-3. Contextually identifiable (e.g., "my social is the same as my phone but with dashes")
-4. Split across multiple lines or sentences
-5. Written with typos or OCR errors (e.g., "SS#: l23-45-6789" where 'l' is meant to be '1')
-6. Embedded in natural language (e.g., "born on the fifteenth of January, nineteen eighty-five")
-7. Using alternative separators or formats (e.g., "123.45.6789" for SSN, "4111 1111 1111 1111" for credit card)
-8. Any sequence of 9 digits that could potentially be an SSN
-9. Any sequence of 8-17 digits that could be an account number
-10. Any 4-digit numbers that could be partial SSNs or PINs
-11. Any dates that could be birth dates (even if just month/day or year)
-12. Any numbers with dashes, spaces, or dots that look like identifiers
-13. References to financial institutions followed by numbers
-14. Any text that mentions "account", "number", "ID", "social", "SSN", "DOB", "born" near numbers
+
+**RETROSPECTIVE PATTERNS (data comes BEFORE the label):**
+1. "five one two three are the numbers of my social" - numbers written as words, then identified as SSN
+2. "123-45-6789 is my social security number" - data first, then label
+3. "four one one one one one one one one one one one one one one one is my card number" - credit card as words
+4. "January 15, 1985 is when I was born" - date before DOB label
+5. "555-123-4567 is my phone" or "that's my number" - phone before label
+6. "12345678 is my account" or "those are my account digits" - account number before label
+7. Any sequence of numbers/words followed by "is my", "are my", "that's my", "those are my"
+8. Numbers followed by references to "social", "SSN", "account", "card", "phone", "birthday", "DOB"
+
+**FORWARD PATTERNS (label comes BEFORE the data):**
+9. "SSN: one two three - four five - six seven eight nine" - SSN as words
+10. "my social is the same as my phone but with dashes" - indirect references
+11. "born on the fifteenth of January, nineteen eighty-five" - dates in natural language
+12. "account number is one two three four five six seven eight" - account as words
+
+**OTHER PATTERNS:**
+13. Obfuscated or partially redacted but still identifiable
+14. Split across multiple lines or sentences
+15. Written with typos or OCR errors (e.g., "SS#: l23-45-6789" where 'l' is meant to be '1')
+16. Using alternative separators or formats (e.g., "123.45.6789" for SSN)
+17. Any sequence of 9 digits that could potentially be an SSN
+18. Any sequence of 8-17 digits that could be an account number
+19. Any 4-digit numbers that could be partial SSNs or PINs
+20. Any numbers with dashes, spaces, or dots that look like identifiers
+21. References to financial institutions near numbers
+22. Spelled-out numbers that form SSN/account patterns (one, two, three, four, five, six, seven, eight, nine, zero)
 
 BE AGGRESSIVE: When in doubt, flag it. The user can always unselect false positives.
 
@@ -39,17 +58,18 @@ IMPORTANT: Only report NEW findings. The following items have already been detec
 
 Return ONLY a valid JSON array with objects containing:
 - type: One of SSN, ACCOUNT_NUMBER, CREDIT_CARD, NAME, ADDRESS, PHONE, EMAIL, DOB
-- value: The exact text as it appears in the document
+- value: The exact text as it appears in the document (include the full phrase if needed for context)
 - normalizedValue: The standardized form (e.g., "123-45-6789" for an SSN written as words)
 - startIndex: Character position where the value starts (estimate if needed)
 - endIndex: Character position where the value ends (estimate if needed)
-- context: Brief explanation of why this was flagged
+- context: Brief explanation of why this was flagged (mention if it's a retrospective pattern)
 
 Example response:
 [
-  {"type": "SSN", "value": "one two three - four five - six seven eight nine", "normalizedValue": "123-45-6789", "startIndex": 45, "endIndex": 93, "context": "SSN written as words"},
-  {"type": "DOB", "value": "born January fifteenth, eighty-five", "normalizedValue": "01/15/1985", "startIndex": 120, "endIndex": 155, "context": "Date of birth in natural language"},
-  {"type": "ACCOUNT_NUMBER", "value": "acct 12345678", "normalizedValue": "12345678", "startIndex": 200, "endIndex": 213, "context": "Account reference with number"}
+  {"type": "SSN", "value": "five one two three four five six seven eight nine is my social", "normalizedValue": "512-34-5678", "startIndex": 45, "endIndex": 107, "context": "SSN written as words with retrospective label"},
+  {"type": "SSN", "value": "one two three - four five - six seven eight nine", "normalizedValue": "123-45-6789", "startIndex": 200, "endIndex": 248, "context": "SSN written as words"},
+  {"type": "DOB", "value": "January 15, 1985 is when I was born", "normalizedValue": "01/15/1985", "startIndex": 300, "endIndex": 335, "context": "Date of birth with retrospective label"},
+  {"type": "ACCOUNT_NUMBER", "value": "12345678 is my account number", "normalizedValue": "12345678", "startIndex": 400, "endIndex": 429, "context": "Account number with retrospective label"}
 ]
 
 If no additional PII found, return: []`;
@@ -171,12 +191,12 @@ export async function detectContextualPII(
         confidence: 0.75, // Lower confidence for contextual matches
         context: e.context,
       }));
-    } catch (parseError) {
-      console.error('Failed to parse LLM contextual response:', parseError);
+    } catch {
+      // Failed to parse LLM response - return empty array
       return [];
     }
-  } catch (error) {
-    console.error('LLM contextual PII detection failed:', error);
+  } catch {
+    // LLM detection failed - return empty array
     return [];
   }
 }
@@ -227,21 +247,168 @@ export async function detectUnstructuredPII(
           endIndex: e.endIndex,
           confidence: e.confidence || 0.85,
         }));
-    } catch (parseError) {
-      console.error('Failed to parse LLM unstructured response:', parseError);
+    } catch {
+      // Failed to parse LLM response
       return [];
     }
-  } catch (error) {
-    console.error('LLM unstructured PII detection failed:', error);
+  } catch {
+    // LLM detection failed
     return [];
   }
 }
 
 /**
- * Main detection function - Two-pass approach
+ * RETROSPECTIVE PASS: Find ALL occurrences of detected entities throughout the document
+ * This ensures comprehensive redaction - if "Robert J. Patterson" is found once,
+ * we find EVERY instance of that name in the document.
+ */
+function findAllOccurrences(text: string, entities: EnhancedPatternMatch[]): EnhancedPatternMatch[] {
+  const additionalMatches: EnhancedPatternMatch[] = [];
+  const lowerText = text.toLowerCase();
+  
+  // Get unique values to search for
+  const uniqueValues = new Map<string, EnhancedPatternMatch>();
+  for (const entity of entities) {
+    const key = entity.value.toLowerCase();
+    if (!uniqueValues.has(key) || entity.confidence > (uniqueValues.get(key)?.confidence || 0)) {
+      uniqueValues.set(key, entity);
+    }
+  }
+  
+  // For each unique entity, find ALL occurrences in the text
+  for (const [lowerValue, entity] of uniqueValues) {
+    let searchIndex = 0;
+    while (searchIndex < lowerText.length) {
+      const foundIndex = lowerText.indexOf(lowerValue, searchIndex);
+      if (foundIndex === -1) break;
+      
+      // Check if this position is already covered by an existing match
+      const alreadyFound = entities.some(e => 
+        e.startIndex === foundIndex && e.endIndex === foundIndex + entity.value.length
+      );
+      
+      if (!alreadyFound) {
+        // Get the actual text from the document (preserves original case)
+        const actualValue = text.substring(foundIndex, foundIndex + entity.value.length);
+        additionalMatches.push({
+          type: entity.type,
+          value: actualValue,
+          startIndex: foundIndex,
+          endIndex: foundIndex + entity.value.length,
+          confidence: entity.confidence,
+          context: `Additional occurrence of "${entity.value}" (retrospective scan)`,
+        });
+      }
+      
+      searchIndex = foundIndex + 1;
+    }
+  }
+  
+  return additionalMatches;
+}
+
+/**
+ * LLM-powered retrospective analysis to find variations and aliases
+ * For example, if we found "Robert J. Patterson", also find "Mr. Patterson", "Robert Patterson", "R. Patterson"
+ */
+async function findEntityVariations(
+  text: string, 
+  entities: EnhancedPatternMatch[]
+): Promise<EnhancedPatternMatch[]> {
+  // Only do this for names and addresses where variations are common
+  const nameEntities = entities.filter(e => e.type === 'NAME');
+  const addressEntities = entities.filter(e => e.type === 'ADDRESS');
+  
+  if (nameEntities.length === 0 && addressEntities.length === 0) {
+    return [];
+  }
+  
+  try {
+    const client = createCaseDevClient();
+    
+    const namesList = nameEntities.map(e => e.value).join(', ');
+    const addressList = addressEntities.map(e => e.value).join(', ');
+    
+    const prompt = `You are a PII detection expert performing a RETROSPECTIVE ANALYSIS.
+
+We have already identified these entities in a document:
+${namesList ? `NAMES: ${namesList}` : ''}
+${addressList ? `ADDRESSES: ${addressList}` : ''}
+
+Your task is to find ALL VARIATIONS, ALIASES, and PARTIAL REFERENCES to these entities in the text below.
+
+For NAMES, look for:
+- Partial names (first name only, last name only)
+- Name with different titles (Mr., Mrs., Dr., etc.)
+- Initials (R.J. Patterson, R. Patterson)
+- Nicknames or shortened forms (Bob for Robert, etc.)
+- Misspellings or OCR errors
+- References like "the plaintiff", "the defendant" if they clearly refer to a named person
+- Possessive forms (Patterson's, Robert's)
+
+For ADDRESSES, look for:
+- Partial addresses (just street, just city/state)
+- Abbreviated forms (St. for Street, Ave. for Avenue)
+- References to "the property", "said address" if they refer to a specific address
+
+Return ONLY a valid JSON array. Each object must have:
+- type: "NAME" or "ADDRESS"
+- value: The exact text as it appears in the document
+- startIndex: Character position where it starts
+- endIndex: Character position where it ends
+- relatedTo: The original entity this is a variation of
+- confidence: 0.0 to 1.0
+
+Example: [{"type": "NAME", "value": "Mr. Patterson", "startIndex": 500, "endIndex": 513, "relatedTo": "Robert J. Patterson", "confidence": 0.9}]
+
+If no variations found, return: []`;
+
+    const response = await client.llm.chat({
+      model: 'openai/gpt-4o',
+      temperature: 0,
+      max_tokens: 4096,
+      messages: [
+        { role: 'system', content: prompt },
+        { role: 'user', content: `Find all variations of the identified entities in this text:\n\n${text}` },
+      ],
+    });
+
+    const content = response.choices[0]?.message?.content || '[]';
+    const cleaned = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    
+    try {
+      const parsed = JSON.parse(cleaned);
+      return parsed.map((e: { 
+        type: EntityType; 
+        value: string; 
+        startIndex: number; 
+        endIndex: number;
+        relatedTo?: string;
+        confidence?: number;
+      }) => ({
+        type: e.type,
+        value: e.value,
+        startIndex: e.startIndex,
+        endIndex: e.endIndex,
+        confidence: e.confidence || 0.8,
+        context: e.relatedTo ? `Variation of "${e.relatedTo}" (AI retrospective)` : 'AI retrospective analysis',
+      }));
+    } catch {
+      // Failed to parse LLM variations response
+      return [];
+    }
+  } catch {
+    // LLM entity variations detection failed
+    return [];
+  }
+}
+
+/**
+ * Main detection function - Three-pass approach with RETROSPECTIVE ANALYSIS
  * 
  * 1. First pass: Regex patterns for standard structured data
  * 2. Second pass: LLM for contextual/non-standard data AND unstructured data (names, addresses)
+ * 3. Third pass: RETROSPECTIVE - Find ALL occurrences of detected entities + variations
  */
 export async function detectAllPII(text: string, types?: EntityType[]): Promise<EnhancedPatternMatch[]> {
   const allMatches: EnhancedPatternMatch[] = [];
@@ -256,8 +423,6 @@ export async function detectAllPII(text: string, types?: EntityType[]): Promise<
   // - Email: user@example.com
   const regexMatches = detectStructuredPII(text, types);
   allMatches.push(...regexMatches.map(m => ({ ...m, context: 'Standard format detected by pattern matching' })));
-  
-  console.log(`[Detector] Pass 1 (Regex): Found ${regexMatches.length} matches`);
 
   // ============================================
   // PASS 2: LLM detection for contextual data
@@ -268,8 +433,6 @@ export async function detectAllPII(text: string, types?: EntityType[]): Promise<
   // - "born on January fifteenth"
   const contextualMatches = await detectContextualPII(text, regexMatches, types);
   allMatches.push(...contextualMatches);
-  
-  console.log(`[Detector] Pass 2a (LLM Contextual): Found ${contextualMatches.length} additional matches`);
 
   // ============================================
   // PASS 2b: LLM detection for unstructured data
@@ -277,14 +440,27 @@ export async function detectAllPII(text: string, types?: EntityType[]): Promise<
   // Names and addresses that can't be reliably detected with regex
   const unstructuredMatches = await detectUnstructuredPII(text, types);
   allMatches.push(...unstructuredMatches.map(m => ({ ...m, context: 'Detected by AI analysis' })));
-  
-  console.log(`[Detector] Pass 2b (LLM Unstructured): Found ${unstructuredMatches.length} matches`);
 
-  // Merge and deduplicate results
-  const merged = mergeResults(allMatches);
-  console.log(`[Detector] Total unique matches after merge: ${merged.length}`);
+  // Merge results so far
+  const mergedSoFar = mergeResults(allMatches);
+
+  // ============================================
+  // PASS 3: RETROSPECTIVE ANALYSIS
+  // ============================================
+  // Now that we know what entities exist, find ALL occurrences
+  // This is the key to comprehensive redaction!
   
-  return merged;
+  // 3a: Find all exact occurrences (case-insensitive)
+  const additionalOccurrences = findAllOccurrences(text, mergedSoFar);
+  
+  // 3b: Find variations and aliases using LLM
+  const variations = await findEntityVariations(text, mergedSoFar);
+  
+  // Combine all matches
+  const finalMatches = [...mergedSoFar, ...additionalOccurrences, ...variations];
+  
+  // Final merge and deduplicate
+  return mergeResults(finalMatches);
 }
 
 /**

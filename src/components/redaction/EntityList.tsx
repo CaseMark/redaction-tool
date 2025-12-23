@@ -17,7 +17,7 @@ export interface DetectedEntity {
   normalizedValue?: string;
   pageNumber: number;
   confidence: number;
-  detectionMethod: 'regex' | 'llm';
+  detectionMethod: 'regex' | 'llm' | 'vault';
   context?: string;
   shouldRedact: boolean;
 }
@@ -35,6 +35,7 @@ interface EntityListProps {
 const DETECTION_METHOD_LABELS: Record<string, string> = {
   regex: 'Pattern Match',
   llm: 'AI Detection',
+  vault: 'Vault Search',
 };
 
 export function EntityList({ 

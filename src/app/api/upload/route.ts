@@ -1,103 +1,82 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db, redactionJobs, documents, redactionLogs } from '@/lib/db';
-import { eq, asc } from 'drizzle-orm';
+import { validateFileUpload, FileUploadConstraints } from '@/lib/validation/schemas';
 
-// POST /api/upload - Upload documents to a job
+/**
+ * POST /api/upload - Upload documents for redaction
+ * 
+ * SECURITY: Files are NOT stored in the database.
+ * For persistent storage, use Case.dev Vault via the /api/vault endpoints.
+ * This endpoint processes files in-memory only.
+ */
 export async function POST(request: NextRequest) {
   try {
     const formData = await request.formData();
-    const jobId = formData.get('jobId') as string;
     const files = formData.getAll('files') as File[];
-
-    if (!jobId) {
-      return NextResponse.json({ error: 'Job ID required' }, { status: 400 });
-    }
 
     if (!files || files.length === 0) {
       return NextResponse.json({ error: 'No files provided' }, { status: 400 });
     }
 
-    // Verify job exists
-    const job = await db.query.redactionJobs.findFirst({
-      where: eq(redactionJobs.id, jobId),
-    });
-    
-    if (!job) {
-      return NextResponse.json({ error: 'Job not found' }, { status: 404 });
+    if (files.length > FileUploadConstraints.maxFiles) {
+      return NextResponse.json(
+        { error: `Maximum ${FileUploadConstraints.maxFiles} files allowed` },
+        { status: 400 }
+      );
     }
 
-    const uploadedDocuments = [];
+    const processedFiles = [];
+    const errors = [];
 
     for (const file of files) {
-      // In production, upload to cloud storage (S3, GCS, etc.)
-      // For now, we'll store a reference and the file data
-      const buffer = await file.arrayBuffer();
-      const base64 = Buffer.from(buffer).toString('base64');
-      
-      // Create a data URL for demo purposes
-      // In production, this would be a cloud storage URL
-      const dataUrl = `data:${file.type};base64,${base64}`;
+      // Validate file
+      const validation = validateFileUpload(file);
+      if (!validation.valid) {
+        errors.push({ filename: file.name, error: validation.error });
+        continue;
+      }
 
-      const [document] = await db.insert(documents).values({
-        jobId,
+      // Process file in memory - extract basic info
+      // Actual text extraction happens client-side or via Case.dev Vault
+      processedFiles.push({
+        id: crypto.randomUUID(),
         filename: file.name,
-        originalUrl: dataUrl,
-        fileSize: file.size,
+        size: file.size,
         mimeType: file.type,
-        ocrStatus: 'pending',
-        detectionStatus: 'pending',
-      }).returning();
-
-      uploadedDocuments.push(document);
+        // Note: File content is NOT stored - only metadata
+        // Use Case.dev Vault for persistent storage
+      });
     }
 
-    // Log upload
-    await db.insert(redactionLogs).values({
-      jobId,
-      action: 'DOCUMENTS_UPLOADED',
-      details: `Uploaded ${files.length} document(s)`,
-      entityCount: files.length,
-      metadata: { filenames: files.map(f => f.name) },
-    });
+    if (processedFiles.length === 0 && errors.length > 0) {
+      return NextResponse.json(
+        { error: 'All files failed validation', details: errors },
+        { status: 400 }
+      );
+    }
 
     return NextResponse.json({
       success: true,
-      documents: uploadedDocuments,
-      count: uploadedDocuments.length,
+      files: processedFiles,
+      count: processedFiles.length,
+      errors: errors.length > 0 ? errors : undefined,
+      message: 'Files validated. For persistent storage, use Case.dev Vault.',
     });
   } catch (error) {
-    console.error('Upload failed:', error);
-    return NextResponse.json(
-      { error: 'Failed to upload documents' },
-      { status: 500 }
-    );
+    const message = error instanceof Error ? error.message : 'Upload failed';
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
 
-// GET /api/upload - Get documents for a job
-export async function GET(request: NextRequest) {
-  try {
-    const { searchParams } = new URL(request.url);
-    const jobId = searchParams.get('jobId');
-
-    if (!jobId) {
-      return NextResponse.json({ error: 'Job ID required' }, { status: 400 });
-    }
-
-    const docs = await db.query.documents.findMany({
-      where: eq(documents.jobId, jobId),
-      with: {
-        entities: true,
-      },
-      orderBy: asc(documents.createdAt),
-    });
-
-    return NextResponse.json(docs);
-  } catch (error) {
-    console.error('Failed to fetch documents:', error);
-    return NextResponse.json(
-      { error: 'Failed to fetch documents' },
-      { status: 500 }
-    );
-  }
+/**
+ * GET /api/upload - Not supported
+ * Use Case.dev Vault API for document retrieval
+ */
+export async function GET() {
+  return NextResponse.json(
+    { 
+      error: 'Direct file retrieval not supported. Use Case.dev Vault API.',
+      documentation: 'https://docs.case.dev/vaults'
+    },
+    { status: 400 }
+  );
 }

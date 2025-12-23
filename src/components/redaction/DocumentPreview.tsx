@@ -1,10 +1,10 @@
 'use client';
 
-import { useMemo, useRef, useEffect, useState } from 'react';
-import { FileText, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Eye, EyeOff } from 'lucide-react';
+import { useMemo, useRef, useEffect, useState, useCallback } from 'react';
+import { FileText, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Eye, EyeOff, Maximize2, X, Plus } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { cn } from '@/lib/utils';
 import { DetectedEntity } from './EntityList';
 
@@ -13,6 +13,7 @@ interface DocumentPreviewProps {
   entities: DetectedEntity[];
   selectedEntityId: string | null;
   onEntityClick: (entityId: string) => void;
+  onAddCustomRedaction?: (text: string, pageNumber: number) => void;
   extractedTexts?: Map<string, string>;
   className?: string;
 }
@@ -22,6 +23,7 @@ export function DocumentPreview({
   entities, 
   selectedEntityId, 
   onEntityClick,
+  onAddCustomRedaction,
   extractedTexts,
   className 
 }: DocumentPreviewProps) {
@@ -30,7 +32,10 @@ export function DocumentPreview({
   const [zoom, setZoom] = useState(100);
   const [viewMode, setViewMode] = useState<'document' | 'text'>('text');
   const [showRedacted, setShowRedacted] = useState(true);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [selectedText, setSelectedText] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const textContainerRef = useRef<HTMLDivElement>(null);
   const entityRefs = useRef<Map<string, HTMLSpanElement>>(new Map());
 
   const currentFile = files[currentFileIndex];
@@ -45,15 +50,46 @@ export function DocumentPreview({
     setFileUrl(null);
   }, [currentFile]);
 
-  // Scroll to selected entity
-  useEffect(() => {
-    if (selectedEntityId && viewMode === 'text') {
-      const element = entityRefs.current.get(selectedEntityId);
-      if (element) {
-        element.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      }
+  // Handle text selection
+  const handleTextSelection = useCallback(() => {
+    const selection = window.getSelection();
+    if (selection && selection.toString().trim().length > 0) {
+      setSelectedText(selection.toString().trim());
+    } else {
+      setSelectedText(null);
     }
-  }, [selectedEntityId, viewMode]);
+  }, []);
+
+  // Listen for selection changes
+  useEffect(() => {
+    document.addEventListener('mouseup', handleTextSelection);
+    document.addEventListener('keyup', handleTextSelection);
+    return () => {
+      document.removeEventListener('mouseup', handleTextSelection);
+      document.removeEventListener('keyup', handleTextSelection);
+    };
+  }, [handleTextSelection]);
+
+  // Handle adding custom redaction
+  const handleAddRedaction = useCallback(() => {
+    if (selectedText && onAddCustomRedaction) {
+      onAddCustomRedaction(selectedText, currentFileIndex + 1);
+      setSelectedText(null);
+      // Clear the selection
+      window.getSelection()?.removeAllRanges();
+    }
+  }, [selectedText, onAddCustomRedaction, currentFileIndex]);
+
+  // Handle escape key to close fullscreen
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && isFullscreen) {
+        setIsFullscreen(false);
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [isFullscreen]);
 
   // Get file type
   const fileType = useMemo(() => {
@@ -156,6 +192,137 @@ export function DocumentPreview({
     setZoom(prev => Math.max(50, prev - 25));
   };
 
+  // Render the document content (shared between normal and fullscreen views)
+  const renderDocumentContent = (inFullscreen: boolean = false) => (
+    <>
+      {/* Text View - Shows extracted text with highlighted redactions */}
+      {viewMode === 'text' && (
+        <div 
+          ref={textContainerRef}
+          className={cn(
+            "h-full overflow-auto bg-white dark:bg-zinc-950 p-4",
+            inFullscreen && "p-8"
+          )}
+        >
+          {highlightedContent ? (
+            <div className={cn(
+              "font-mono text-sm leading-relaxed whitespace-pre-wrap",
+              inFullscreen && "text-base leading-loose max-w-4xl mx-auto"
+            )}>
+              {highlightedContent.map((segment, index) => {
+                if (!segment.isHighlight || !segment.entity) {
+                  return <span key={index}>{segment.text}</span>;
+                }
+
+                const entity = segment.entity;
+                const isSelected = selectedEntityId === entity.id;
+                const displayText = showRedacted && entity.shouldRedact 
+                  ? entity.maskedValue 
+                  : segment.text;
+
+                return (
+                  <span
+                    key={index}
+                    ref={(el) => {
+                      if (el) entityRefs.current.set(entity.id, el);
+                    }}
+                    onClick={() => onEntityClick(entity.id)}
+                    className={cn(
+                      'cursor-pointer px-1 py-0.5 rounded transition-all inline',
+                      entity.shouldRedact 
+                        ? 'bg-zinc-200 dark:bg-zinc-700' 
+                        : 'bg-zinc-100 dark:bg-zinc-800 opacity-50',
+                      isSelected && 'ring-2 ring-zinc-900 dark:ring-zinc-100 bg-zinc-300 dark:bg-zinc-600',
+                      'hover:bg-zinc-300 dark:hover:bg-zinc-600'
+                    )}
+                    title={`${entity.type}: ${entity.shouldRedact ? 'Will be redacted' : 'Excluded from redaction'}`}
+                  >
+                    {displayText}
+                  </span>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="flex items-center justify-center h-full">
+              <div className="text-center text-muted-foreground">
+                <FileText className="w-12 h-12 mx-auto mb-3 opacity-30" />
+                <p className="text-sm">No text extracted from this document</p>
+                <p className="text-xs mt-1">Try uploading a PDF or text file</p>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Document View - Shows original document */}
+      {viewMode === 'document' && (
+        <div className="h-full overflow-auto bg-zinc-100 dark:bg-zinc-900">
+          {fileUrl && fileType === 'pdf' && (
+            <div 
+              className="flex items-start justify-center p-4"
+              style={{ minHeight: '100%' }}
+            >
+              <div 
+                className="bg-white shadow-lg"
+                style={{ 
+                  width: `${zoom}%`,
+                  maxWidth: '100%',
+                  transform: `scale(${zoom / 100})`,
+                  transformOrigin: 'top center'
+                }}
+              >
+                <embed
+                  src={`${fileUrl}#toolbar=0&navpanes=0&scrollbar=0`}
+                  type="application/pdf"
+                  className="w-full"
+                  style={{ height: inFullscreen ? '90vh' : '800px' }}
+                />
+              </div>
+            </div>
+          )}
+
+          {fileUrl && fileType === 'image' && (
+            <div 
+              className="flex items-start justify-center p-4"
+              style={{ minHeight: '100%' }}
+            >
+              <img
+                src={fileUrl}
+                alt={currentFile?.file.name}
+                className="max-w-full shadow-lg bg-white"
+                style={{ 
+                  width: `${zoom}%`,
+                  maxWidth: 'none'
+                }}
+              />
+            </div>
+          )}
+
+          {fileType === 'text' && currentExtractedText && (
+            <div className="p-4">
+              <pre className={cn(
+                "font-mono text-sm whitespace-pre-wrap bg-white dark:bg-zinc-950 p-4 rounded shadow",
+                inFullscreen && "text-base max-w-4xl mx-auto"
+              )}>
+                {currentExtractedText}
+              </pre>
+            </div>
+          )}
+
+          {fileType === 'unknown' && (
+            <div className="flex items-center justify-center h-full">
+              <div className="text-center text-muted-foreground p-8">
+                <FileText className="w-16 h-16 mx-auto mb-4 opacity-30" />
+                <p className="text-sm font-medium mb-1">Preview not available</p>
+                <p className="text-xs">File type: {currentFile?.file.type || 'Unknown'}</p>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </>
+  );
+
   if (files.length === 0) {
     return (
       <Card className={cn('flex flex-col', className)}>
@@ -174,233 +341,236 @@ export function DocumentPreview({
   }
 
   return (
-    <Card className={cn('flex flex-col', className)}>
-      <CardHeader className="pb-3 space-y-1 shrink-0">
-        <div className="flex items-center justify-between">
-          <div>
-            <CardTitle className="text-sm font-semibold tracking-tight">Document Preview</CardTitle>
-            <CardDescription className="text-xs truncate max-w-[200px]">
-              {currentFile?.file.name}
-            </CardDescription>
-          </div>
-          <div className="flex items-center gap-2">
-            {/* View mode toggle */}
-            <Tabs value={viewMode} onValueChange={(v) => setViewMode(v as 'document' | 'text')} className="h-8">
-              <TabsList className="h-7">
-                <TabsTrigger value="text" className="text-xs h-6 px-2">Text</TabsTrigger>
-                <TabsTrigger value="document" className="text-xs h-6 px-2">Original</TabsTrigger>
-              </TabsList>
-            </Tabs>
-          </div>
-        </div>
-        
-        {/* File navigation and controls */}
-        <div className="flex items-center justify-between pt-2">
-          <div className="flex items-center gap-1">
-            {files.length > 1 && (
-              <>
-                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={handlePrevFile} disabled={currentFileIndex === 0}>
-                  <ChevronLeft className="w-4 h-4" />
-                </Button>
-                <span className="text-xs text-muted-foreground px-1">
-                  {currentFileIndex + 1}/{files.length}
-                </span>
-                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={handleNextFile} disabled={currentFileIndex === files.length - 1}>
-                  <ChevronRight className="w-4 h-4" />
-                </Button>
-              </>
-            )}
-          </div>
-          
-          <div className="flex items-center gap-1">
-            {viewMode === 'text' && (
-              <Button 
-                variant="ghost" 
-                size="sm" 
-                className="h-7 px-2 text-xs"
-                onClick={() => setShowRedacted(!showRedacted)}
-              >
-                {showRedacted ? <EyeOff className="w-3.5 h-3.5 mr-1" /> : <Eye className="w-3.5 h-3.5 mr-1" />}
-                {showRedacted ? 'Show Original' : 'Show Redacted'}
-              </Button>
-            )}
-            {viewMode === 'document' && (
-              <>
-                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={handleZoomOut} disabled={zoom <= 50}>
-                  <ZoomOut className="w-4 h-4" />
-                </Button>
-                <span className="text-xs text-muted-foreground w-10 text-center">{zoom}%</span>
-                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={handleZoomIn} disabled={zoom >= 200}>
-                  <ZoomIn className="w-4 h-4" />
-                </Button>
-              </>
-            )}
-          </div>
-        </div>
-
-        {/* Entity legend */}
-        {currentEntities.length > 0 && (
-          <div className="flex flex-wrap gap-2 pt-2">
-            <span className="text-xs text-muted-foreground">Detected:</span>
-            {Array.from(new Set(currentEntities.map(e => e.type))).map((type) => (
-              <span
-                key={type}
-                className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium bg-zinc-800 text-white rounded"
-              >
-                {type.replace('_', ' ')}
-              </span>
-            ))}
-          </div>
-        )}
-      </CardHeader>
-
-      <CardContent className="flex-1 p-0 min-h-0 overflow-hidden" ref={containerRef}>
-        {/* Text View - Shows extracted text with highlighted redactions */}
-        {viewMode === 'text' && (
-          <div className="h-full overflow-auto bg-white dark:bg-zinc-950 p-4">
-            {highlightedContent ? (
-              <div className="font-mono text-sm leading-relaxed whitespace-pre-wrap">
-                {highlightedContent.map((segment, index) => {
-                  if (!segment.isHighlight || !segment.entity) {
-                    return <span key={index}>{segment.text}</span>;
-                  }
-
-                  const entity = segment.entity;
-                  const isSelected = selectedEntityId === entity.id;
-                  const displayText = showRedacted && entity.shouldRedact 
-                    ? entity.maskedValue 
-                    : segment.text;
-
-                  return (
-                    <span
-                      key={index}
-                      ref={(el) => {
-                        if (el) entityRefs.current.set(entity.id, el);
-                      }}
-                      onClick={() => onEntityClick(entity.id)}
-                      className={cn(
-                        'cursor-pointer px-1 py-0.5 rounded transition-all inline',
-                        entity.shouldRedact 
-                          ? 'bg-zinc-200 dark:bg-zinc-700' 
-                          : 'bg-zinc-100 dark:bg-zinc-800 opacity-50',
-                        isSelected && 'ring-2 ring-zinc-900 dark:ring-zinc-100 bg-zinc-300 dark:bg-zinc-600',
-                        'hover:bg-zinc-300 dark:hover:bg-zinc-600'
-                      )}
-                      title={`${entity.type}: ${entity.shouldRedact ? 'Will be redacted' : 'Excluded from redaction'}`}
-                    >
-                      {displayText}
-                    </span>
-                  );
-                })}
-              </div>
-            ) : (
-              <div className="flex items-center justify-center h-full">
-                <div className="text-center text-muted-foreground">
-                  <FileText className="w-12 h-12 mx-auto mb-3 opacity-30" />
-                  <p className="text-sm">No text extracted from this document</p>
-                  <p className="text-xs mt-1">Try uploading a PDF or text file</p>
+    <>
+      {/* Fullscreen Modal */}
+      {isFullscreen && (
+        <div className="fixed inset-0 z-50 bg-background/95 backdrop-blur-sm">
+          <div className="h-full flex flex-col">
+            {/* Fullscreen Header */}
+            <div className="flex items-center justify-between p-4 border-b shrink-0">
+              <div className="flex items-center gap-4">
+                <div>
+                  <h2 className="text-lg font-semibold">Document Preview</h2>
+                  <p className="text-sm text-muted-foreground">{currentFile?.file.name}</p>
                 </div>
+                
+                {/* View mode toggle */}
+                <Tabs value={viewMode} onValueChange={(v) => setViewMode(v as 'document' | 'text')} className="h-8">
+                  <TabsList className="h-8">
+                    <TabsTrigger value="text" className="text-xs h-7 px-3">Text</TabsTrigger>
+                    <TabsTrigger value="document" className="text-xs h-7 px-3">Original</TabsTrigger>
+                  </TabsList>
+                </Tabs>
               </div>
-            )}
-          </div>
-        )}
-
-        {/* Document View - Shows original document */}
-        {viewMode === 'document' && (
-          <div className="h-full overflow-auto bg-zinc-100 dark:bg-zinc-900">
-            {fileUrl && fileType === 'pdf' && (
-              <div 
-                className="flex items-start justify-center p-4"
-                style={{ minHeight: '100%' }}
-              >
-                <div 
-                  className="bg-white shadow-lg"
-                  style={{ 
-                    width: `${zoom}%`,
-                    maxWidth: '100%',
-                    transform: `scale(${zoom / 100})`,
-                    transformOrigin: 'top center'
-                  }}
-                >
-                  <embed
-                    src={`${fileUrl}#toolbar=0&navpanes=0&scrollbar=0`}
-                    type="application/pdf"
-                    className="w-full"
-                    style={{ height: '800px' }}
-                  />
-                </div>
+              
+              <div className="flex items-center gap-2">
+                {/* Redact Element Button - shown when text is selected */}
+                {selectedText && onAddCustomRedaction && (
+                  <Button 
+                    size="sm" 
+                    onClick={handleAddRedaction}
+                    className="bg-red-600 hover:bg-red-700 text-white"
+                  >
+                    <Plus className="w-4 h-4 mr-1" />
+                    Redact Element
+                  </Button>
+                )}
+                
+                {viewMode === 'text' && (
+                  <Button 
+                    variant="outline" 
+                    size="sm"
+                    onClick={() => setShowRedacted(!showRedacted)}
+                  >
+                    {showRedacted ? <EyeOff className="w-4 h-4 mr-1" /> : <Eye className="w-4 h-4 mr-1" />}
+                    {showRedacted ? 'Show Original' : 'Show Redacted'}
+                  </Button>
+                )}
+                
+                {viewMode === 'document' && (
+                  <div className="flex items-center gap-1">
+                    <Button variant="outline" size="sm" onClick={handleZoomOut} disabled={zoom <= 50}>
+                      <ZoomOut className="w-4 h-4" />
+                    </Button>
+                    <span className="text-sm text-muted-foreground w-12 text-center">{zoom}%</span>
+                    <Button variant="outline" size="sm" onClick={handleZoomIn} disabled={zoom >= 200}>
+                      <ZoomIn className="w-4 h-4" />
+                    </Button>
+                  </div>
+                )}
+                
+                <Button variant="outline" size="sm" onClick={() => setIsFullscreen(false)}>
+                  <X className="w-4 h-4 mr-1" />
+                  Close
+                </Button>
               </div>
-            )}
-
-            {fileUrl && fileType === 'image' && (
-              <div 
-                className="flex items-start justify-center p-4"
-                style={{ minHeight: '100%' }}
-              >
-                <img
-                  src={fileUrl}
-                  alt={currentFile?.file.name}
-                  className="max-w-full shadow-lg bg-white"
-                  style={{ 
-                    width: `${zoom}%`,
-                    maxWidth: 'none'
-                  }}
-                />
-              </div>
-            )}
-
-            {fileType === 'text' && currentExtractedText && (
-              <div className="p-4">
-                <pre className="font-mono text-sm whitespace-pre-wrap bg-white dark:bg-zinc-950 p-4 rounded shadow">
-                  {currentExtractedText}
-                </pre>
-              </div>
-            )}
-
-            {fileType === 'unknown' && (
-              <div className="flex items-center justify-center h-full">
-                <div className="text-center text-muted-foreground p-8">
-                  <FileText className="w-16 h-16 mx-auto mb-4 opacity-30" />
-                  <p className="text-sm font-medium mb-1">Preview not available</p>
-                  <p className="text-xs">File type: {currentFile?.file.type || 'Unknown'}</p>
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-      </CardContent>
-
-      {/* Detected entities summary bar */}
-      {currentEntities.length > 0 && (
-        <div className="border-t p-3 shrink-0">
-          <div className="flex items-center justify-between text-xs">
-            <span className="text-muted-foreground">
-              {currentEntities.filter(e => e.shouldRedact).length} redactions on this page
-            </span>
-            <div className="flex gap-1 overflow-x-auto">
-              {currentEntities.slice(0, 5).map((entity) => (
-                <button
-                  key={entity.id}
-                  onClick={() => onEntityClick(entity.id)}
-                  className={cn(
-                    'px-2 py-1 rounded text-[10px] font-mono transition-colors whitespace-nowrap',
-                    'bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700',
-                    selectedEntityId === entity.id && 'ring-2 ring-zinc-900 dark:ring-zinc-100',
-                    !entity.shouldRedact && 'opacity-40 line-through'
-                  )}
-                >
-                  {entity.maskedValue.length > 10 ? entity.maskedValue.slice(0, 10) + '...' : entity.maskedValue}
-                </button>
-              ))}
-              {currentEntities.length > 5 && (
-                <span className="px-2 py-1 text-[10px] text-muted-foreground">
-                  +{currentEntities.length - 5} more
-                </span>
-              )}
             </div>
+            
+            {/* Fullscreen Content */}
+            <div className="flex-1 min-h-0 overflow-hidden">
+              {renderDocumentContent(true)}
+            </div>
+            
+            {/* Fullscreen Footer */}
+            {files.length > 1 && (
+              <div className="flex items-center justify-center gap-4 p-4 border-t shrink-0">
+                <Button variant="outline" size="sm" onClick={handlePrevFile} disabled={currentFileIndex === 0}>
+                  <ChevronLeft className="w-4 h-4 mr-1" />
+                  Previous
+                </Button>
+                <span className="text-sm text-muted-foreground">
+                  Document {currentFileIndex + 1} of {files.length}
+                </span>
+                <Button variant="outline" size="sm" onClick={handleNextFile} disabled={currentFileIndex === files.length - 1}>
+                  Next
+                  <ChevronRight className="w-4 h-4 ml-1" />
+                </Button>
+              </div>
+            )}
           </div>
         </div>
       )}
-    </Card>
+
+      {/* Normal Card View */}
+      <Card className={cn('flex flex-col', className)}>
+        <CardHeader className="pb-3 space-y-1 shrink-0">
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="text-sm font-semibold tracking-tight">Document Preview</CardTitle>
+              <CardDescription className="text-xs truncate max-w-[200px]">
+                {currentFile?.file.name}
+              </CardDescription>
+            </div>
+            <div className="flex items-center gap-2">
+              {/* Redact Element Button - shown when text is selected */}
+              {selectedText && onAddCustomRedaction && (
+                <Button 
+                  size="sm" 
+                  onClick={handleAddRedaction}
+                  className="h-7 text-xs bg-red-600 hover:bg-red-700 text-white"
+                >
+                  <Plus className="w-3.5 h-3.5 mr-1" />
+                  Redact Element
+                </Button>
+              )}
+              
+              {/* Fullscreen button */}
+              <Button 
+                variant="ghost" 
+                size="sm" 
+                className="h-7 w-7 p-0"
+                onClick={() => setIsFullscreen(true)}
+                title="Fullscreen"
+              >
+                <Maximize2 className="w-4 h-4" />
+              </Button>
+              
+              {/* View mode toggle */}
+              <Tabs value={viewMode} onValueChange={(v) => setViewMode(v as 'document' | 'text')} className="h-8">
+                <TabsList className="h-7">
+                  <TabsTrigger value="text" className="text-xs h-6 px-2">Text</TabsTrigger>
+                  <TabsTrigger value="document" className="text-xs h-6 px-2">Original</TabsTrigger>
+                </TabsList>
+              </Tabs>
+            </div>
+          </div>
+          
+          {/* File navigation and controls */}
+          <div className="flex items-center justify-between pt-2">
+            <div className="flex items-center gap-1">
+              {files.length > 1 && (
+                <>
+                  <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={handlePrevFile} disabled={currentFileIndex === 0}>
+                    <ChevronLeft className="w-4 h-4" />
+                  </Button>
+                  <span className="text-xs text-muted-foreground px-1">
+                    {currentFileIndex + 1}/{files.length}
+                  </span>
+                  <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={handleNextFile} disabled={currentFileIndex === files.length - 1}>
+                    <ChevronRight className="w-4 h-4" />
+                  </Button>
+                </>
+              )}
+            </div>
+            
+            <div className="flex items-center gap-1">
+              {viewMode === 'text' && (
+                <Button 
+                  variant="ghost" 
+                  size="sm" 
+                  className="h-7 px-2 text-xs"
+                  onClick={() => setShowRedacted(!showRedacted)}
+                >
+                  {showRedacted ? <EyeOff className="w-3.5 h-3.5 mr-1" /> : <Eye className="w-3.5 h-3.5 mr-1" />}
+                  {showRedacted ? 'Show Original' : 'Show Redacted'}
+                </Button>
+              )}
+              {viewMode === 'document' && (
+                <>
+                  <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={handleZoomOut} disabled={zoom <= 50}>
+                    <ZoomOut className="w-4 h-4" />
+                  </Button>
+                  <span className="text-xs text-muted-foreground w-10 text-center">{zoom}%</span>
+                  <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={handleZoomIn} disabled={zoom >= 200}>
+                    <ZoomIn className="w-4 h-4" />
+                  </Button>
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* Entity legend */}
+          {currentEntities.length > 0 && (
+            <div className="flex flex-wrap gap-2 pt-2">
+              <span className="text-xs text-muted-foreground">Detected:</span>
+              {Array.from(new Set(currentEntities.map(e => e.type))).map((type) => (
+                <span
+                  key={type}
+                  className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium bg-zinc-800 text-white rounded"
+                >
+                  {type.replace('_', ' ')}
+                </span>
+              ))}
+            </div>
+          )}
+        </CardHeader>
+
+        <CardContent className="flex-1 p-0 min-h-0 overflow-hidden" ref={containerRef}>
+          {renderDocumentContent(false)}
+        </CardContent>
+
+        {/* Detected entities summary bar */}
+        {currentEntities.length > 0 && (
+          <div className="border-t p-3 shrink-0">
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-muted-foreground">
+                {currentEntities.filter(e => e.shouldRedact).length} redactions on this page
+              </span>
+              <div className="flex gap-1 overflow-x-auto">
+                {currentEntities.slice(0, 5).map((entity) => (
+                  <button
+                    key={entity.id}
+                    onClick={() => onEntityClick(entity.id)}
+                    className={cn(
+                      'px-2 py-1 rounded text-[10px] font-mono transition-colors whitespace-nowrap',
+                      'bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700',
+                      selectedEntityId === entity.id && 'ring-2 ring-zinc-900 dark:ring-zinc-100',
+                      !entity.shouldRedact && 'opacity-40 line-through'
+                    )}
+                  >
+                    {entity.maskedValue.length > 10 ? entity.maskedValue.slice(0, 10) + '...' : entity.maskedValue}
+                  </button>
+                ))}
+                {currentEntities.length > 5 && (
+                  <span className="px-2 py-1 text-[10px] text-muted-foreground">
+                    +{currentEntities.length - 5} more
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+      </Card>
+    </>
   );
 }

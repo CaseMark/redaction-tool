@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { detectAllPII, maskEntity, EnhancedPatternMatch } from '@/lib/redaction/detector';
+import { detectAllPII, maskEntity } from '@/lib/redaction/detector';
 import { EntityType } from '@/lib/redaction/patterns';
+import { validateRequestBody, DetectPIIRequestSchema } from '@/lib/validation/schemas';
+import { checkRateLimit, rateLimitExceededResponse, addRateLimitHeaders, RateLimits } from '@/lib/security/rate-limit';
 
 export interface DetectionResult {
   id: string;
@@ -15,11 +17,12 @@ export interface DetectionResult {
 }
 
 /**
- * POST /api/detect-pii - Simple PII detection endpoint
+ * POST /api/detect-pii - PII detection endpoint
  * 
- * This endpoint runs the two-pass detection:
+ * This endpoint runs multi-pass detection:
  * 1. Regex patterns for standard formats
  * 2. LLM for contextual/semantic detection
+ * 3. Retrospective scan for all occurrences
  * 
  * Request body:
  * - text: string - The text to scan for PII
@@ -29,24 +32,23 @@ export interface DetectionResult {
  * - matches: DetectionResult[] - Detected PII entities
  */
 export async function POST(request: NextRequest) {
-  try {
-    const body = await request.json();
-    const { text, types } = body as { text: string; types?: EntityType[] };
+  // Rate limiting
+  const rateLimit = checkRateLimit(request, RateLimits.detectPII, 'detect-pii');
+  if (!rateLimit.allowed) {
+    return rateLimitExceededResponse(rateLimit.resetIn);
+  }
 
-    if (!text || typeof text !== 'string') {
-      return NextResponse.json(
-        { error: 'Text is required and must be a string' },
-        { status: 400 }
-      );
+  try {
+    // Validate request body
+    const validation = await validateRequestBody(request, DetectPIIRequestSchema);
+    if (!validation.success) {
+      return NextResponse.json({ error: validation.error }, { status: 400 });
     }
 
-    console.log(`[API] Starting PII detection for ${text.length} characters`);
-    console.log(`[API] Requested types: ${types?.join(', ') || 'all'}`);
+    const { text, types } = validation.data;
 
-    // Run the two-pass detection
+    // Run the multi-pass detection
     const matches = await detectAllPII(text, types);
-
-    console.log(`[API] Detection complete. Found ${matches.length} matches`);
 
     // Convert to response format with IDs and masked values
     const results: DetectionResult[] = matches.map((match, index) => ({
@@ -61,19 +63,17 @@ export async function POST(request: NextRequest) {
       detectionMethod: match.confidence > 0.9 ? 'regex' : 'llm',
     }));
 
-    return NextResponse.json({
+    const response = NextResponse.json({
       success: true,
       count: results.length,
       matches: results,
     });
+
+    return addRateLimitHeaders(response, rateLimit.remaining, rateLimit.resetIn);
   } catch (error) {
-    console.error('[API] PII detection failed:', error);
-    
+    const message = error instanceof Error ? error.message : 'PII detection failed';
     return NextResponse.json(
-      { 
-        error: 'PII detection failed',
-        details: error instanceof Error ? error.message : 'Unknown error'
-      },
+      { error: 'PII detection failed', details: message },
       { status: 500 }
     );
   }

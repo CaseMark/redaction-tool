@@ -1,5 +1,5 @@
 /**
- * Case.dev API Client - Unified client for OCR, LLM, and Format APIs
+ * Case.dev API Client - Unified client for OCR, LLM, Vault, and Format APIs
  */
 
 const CASE_DEV_BASE_URL = 'https://api.case.dev';
@@ -75,6 +75,127 @@ class CaseDevClient {
       });
     },
   };
+
+  // Vault API - Per docs: https://docs.case.dev/vaults/manage
+  vault = {
+    // List all vaults - GET /vault
+    list: async () => {
+      return this.request<{ vaults: VaultInfo[]; total: number }>('/vault', {
+        method: 'GET',
+      });
+    },
+
+    // Get vault details - GET /vault/:id
+    get: async (vaultId: string) => {
+      return this.request<VaultInfo>(`/vault/${vaultId}`, {
+        method: 'GET',
+      });
+    },
+
+    // Create a new vault - POST /vault
+    create: async (params: { name: string; description?: string }) => {
+      return this.request<VaultInfo>('/vault', {
+        method: 'POST',
+        body: JSON.stringify(params),
+      });
+    },
+
+    // List documents in a vault - GET /vault/:id/objects
+    listObjects: async (vaultId: string) => {
+      return this.request<{ objects: VaultObject[]; count: number }>(`/vault/${vaultId}/objects`, {
+        method: 'GET',
+      });
+    },
+
+    // Get extracted text from a document - GET /vault/:vaultId/objects/:objectId/text
+    getText: async (vaultId: string, objectId: string): Promise<string> => {
+      const response = await fetch(`${this.baseUrl}/vault/${vaultId}/objects/${objectId}/text`, {
+        headers: { 'Authorization': `Bearer ${this.apiKey}` },
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to get text: ${response.statusText}`);
+      }
+      return response.text();
+    },
+
+    // Get presigned URL for upload - POST /vault/:id/upload
+    getUploadUrl: async (vaultId: string, params: { filename: string; contentType: string }) => {
+      return this.request<{ uploadUrl: string; objectId: string }>(`/vault/${vaultId}/upload`, {
+        method: 'POST',
+        body: JSON.stringify(params),
+      });
+    },
+
+    // Ingest (index) a document after upload - POST /vault/:id/ingest
+    ingest: async (vaultId: string, objectId: string, params?: { metadata?: Record<string, unknown> }) => {
+      return this.request<{ status: string; objectId: string }>(`/vault/${vaultId}/ingest`, {
+        method: 'POST',
+        body: JSON.stringify({ objectId, ...params }),
+      });
+    },
+
+    // Search vault with different methods (hybrid, fast, local, global)
+    // POST /vault/:id/search
+    search: async (vaultId: string, params: { 
+      query: string; 
+      method?: 'hybrid' | 'fast' | 'local' | 'global';
+      topK?: number;
+      filters?: Record<string, unknown>;
+    }) => {
+      return this.request<VaultSearchResult>(`/vault/${vaultId}/search`, {
+        method: 'POST',
+        body: JSON.stringify(params),
+      });
+    },
+
+    // Initialize GraphRAG on a vault - POST /vault/:id/graphrag/init
+    initGraphRAG: async (vaultId: string) => {
+      return this.request<{ status: string; message: string }>(`/vault/${vaultId}/graphrag/init`, {
+        method: 'POST',
+      });
+    },
+
+    // Delete a vault - DELETE /vault/:id
+    delete: async (vaultId: string, asyncDelete?: boolean) => {
+      const url = asyncDelete ? `/vault/${vaultId}?async=true` : `/vault/${vaultId}`;
+      return this.request<{ success: boolean }>(url, {
+        method: 'DELETE',
+      });
+    },
+  };
+}
+
+// Type definitions
+export interface VaultInfo {
+  id: string;
+  name: string;
+  totalObjects?: number;
+  totalBytes?: number;
+  createdAt?: string;
+}
+
+export interface VaultObject {
+  id: string;
+  filename: string;
+  sizeBytes: number;
+  ingestionStatus: 'pending' | 'processing' | 'completed' | 'failed';
+  pageCount?: number;
+  createdAt?: string;
+}
+
+export interface VaultSearchResult {
+  chunks: Array<{
+    text: string;
+    filename?: string;
+    page?: number;
+    score: number;
+    object_id?: string;
+  }>;
+  sources?: Array<{
+    id: string;
+    filename: string;
+  }>;
+  response?: string; // For GraphRAG global/local queries
 }
 
 export interface OCRJsonOutput {
