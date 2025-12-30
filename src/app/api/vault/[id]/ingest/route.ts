@@ -27,7 +27,8 @@ export async function POST(
     const client = createCaseDevClient();
     
     // Trigger ingestion (OCR + embedding)
-    const result = await client.vault.ingest(vaultId, objectId, { metadata });
+    // API endpoint: POST /vault/:vaultId/ingest/:objectId
+    const result = await client.vault.ingest(vaultId, objectId, metadata ? { metadata } : undefined);
 
     return NextResponse.json(result);
   } catch (error) {

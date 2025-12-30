@@ -126,11 +126,11 @@ class CaseDevClient {
       });
     },
 
-    // Ingest (index) a document after upload - POST /vault/:id/ingest
+    // Ingest (index) a document after upload - POST /vault/:vaultId/ingest/:objectId
     ingest: async (vaultId: string, objectId: string, params?: { metadata?: Record<string, unknown> }) => {
-      return this.request<{ status: string; objectId: string }>(`/vault/${vaultId}/ingest`, {
+      return this.request<{ status: string; objectId: string }>(`/vault/${vaultId}/ingest/${objectId}`, {
         method: 'POST',
-        body: JSON.stringify({ objectId, ...params }),
+        body: params ? JSON.stringify(params) : undefined,
       });
     },
 

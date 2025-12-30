@@ -184,7 +184,7 @@ export default function RedactionTool() {
     setSelectedEntityId(newEntity.id);
   }, []);
 
-  // Extract text from a file
+  // Extract text from a file using Case.dev OCR API
   const extractTextFromFile = async (file: File): Promise<string> => {
     const fileType = file.type;
     
@@ -193,46 +193,29 @@ export default function RedactionTool() {
       return await file.text();
     }
     
-    // For PDFs, we'll use pdf.js (loaded dynamically)
-    if (fileType === 'application/pdf') {
+    // For PDFs and images, use Case.dev OCR API
+    if (fileType === 'application/pdf' || fileType.startsWith('image/')) {
       try {
-        // Dynamic import of pdf.js
-        const pdfjsLib = await import('pdfjs-dist');
+        const formData = new FormData();
+        formData.append('file', file);
         
-        // Use local worker file from public folder
-        pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
+        const response = await fetch('/api/ocr', {
+          method: 'POST',
+          body: formData,
+        });
         
-        const arrayBuffer = await file.arrayBuffer();
-        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-        
-        let fullText = '';
-        for (let i = 1; i <= pdf.numPages; i++) {
-          const page = await pdf.getPage(i);
-          const textContent = await page.getTextContent();
-          const pageText = textContent.items
-            .map((item) => {
-              // TextItem has 'str' property, TextMarkedContent does not
-              if ('str' in item && typeof item.str === 'string') {
-                return item.str;
-              }
-              return '';
-            })
-            .join(' ');
-          fullText += pageText + '\n\n';
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({ error: 'OCR failed' }));
+          throw new Error(errorData.error || 'OCR processing failed');
         }
         
-        return fullText.trim();
-      } catch (pdfError) {
-        console.error('PDF extraction failed:', pdfError);
-        // Return a message indicating PDF text couldn't be extracted
-        return `[PDF text extraction unavailable - file: ${file.name}]`;
+        const result = await response.json();
+        return result.text || '';
+      } catch (ocrError) {
+        console.error('OCR extraction failed:', ocrError);
+        // Return a message indicating text couldn't be extracted
+        return `[OCR extraction failed for: ${file.name}. Error: ${ocrError instanceof Error ? ocrError.message : 'Unknown error'}]`;
       }
-    }
-    
-    // For images, we would use OCR (Tesseract.js or server-side)
-    // For now, return a placeholder indicating OCR is needed
-    if (fileType.startsWith('image/')) {
-      return `[Image file - OCR processing required for: ${file.name}]`;
     }
     
     return `[Unsupported file type: ${fileType}]`;
@@ -243,7 +226,7 @@ export default function RedactionTool() {
 
     setIsProcessing(true);
     setError(null);
-    setProcessingStatus({ step: 'Extracting text...', progress: 5, message: 'Reading document content' });
+    setProcessingStatus({ step: 'Extracting text via OCR...', progress: 5, message: 'Uploading document to Case.dev OCR' });
 
     try {
       const allEntities: DetectedEntity[] = [];
@@ -255,9 +238,9 @@ export default function RedactionTool() {
         const fileProgress = (i / files.length) * 100;
         
         setProcessingStatus({ 
-          step: 'Extracting text...', 
+          step: 'Extracting text via OCR...', 
           progress: 5 + (fileProgress * 0.2), 
-          message: `Processing ${file.file.name}` 
+          message: `OCR processing ${file.file.name}` 
         });
         
         // Extract text from the file (or use pre-extracted for vault docs)
@@ -660,10 +643,11 @@ export default function RedactionTool() {
       
       setProcessingStatus({ step: 'Waiting for processing...', progress: 85, message: 'Document is being processed. This may take a moment...' });
       
-      // Step 5: Poll for completion (with timeout)
+      // Step 5: Poll for completion (with longer timeout for OCR)
       let attempts = 0;
-      const maxAttempts = 30; // 30 seconds max
+      const maxAttempts = 120; // 2 minutes max for OCR processing
       let documentReady = false;
+      let lastStatus = 'pending';
       
       while (attempts < maxAttempts && !documentReady) {
         await new Promise(resolve => setTimeout(resolve, 1000));
@@ -672,35 +656,49 @@ export default function RedactionTool() {
         if (objectsResponse.ok) {
           const { objects } = await objectsResponse.json();
           const doc = objects.find((o: { id: string; ingestionStatus: string }) => o.id === objectId);
+          lastStatus = doc?.ingestionStatus || 'pending';
           if (doc?.ingestionStatus === 'completed') {
             documentReady = true;
           } else if (doc?.ingestionStatus === 'failed') {
-            throw new Error('Document processing failed');
+            throw new Error('Document processing failed. The file may be corrupted or unsupported.');
           }
         }
         attempts++;
+        const progressPercent = 85 + (attempts / maxAttempts) * 10;
         setProcessingStatus({ 
           step: 'Waiting for processing...', 
-          progress: 85 + (attempts / maxAttempts) * 10, 
-          message: `Document is being processed (${attempts}s)...` 
+          progress: Math.min(progressPercent, 95), 
+          message: `OCR processing in progress (${attempts}s)... Status: ${lastStatus}` 
         });
       }
       
-      if (!documentReady) {
-        // Document is still processing, but we can proceed - it will be available soon
-        setProcessingStatus({ step: 'Document queued', progress: 95, message: 'Document is still processing but will be available shortly' });
+      // Step 6: Fetch the document text (or proceed without vault context if still processing)
+      let text = '';
+      
+      if (documentReady) {
+        setProcessingStatus({ step: 'Loading document...', progress: 98, message: 'Fetching processed text' });
+        
+        const textResponse = await fetch(`/api/vault/${vault.id}/objects/${objectId}/text`);
+        if (textResponse.ok) {
+          const data = await textResponse.json();
+          text = data.text;
+        }
       }
       
-      setProcessingStatus({ step: 'Loading document...', progress: 98, message: 'Fetching processed text' });
-      
-      // Step 6: Fetch the document text
-      const textResponse = await fetch(`/api/vault/${vault.id}/objects/${objectId}/text`);
-      if (!textResponse.ok) {
-        // If text isn't ready yet, proceed without it - user can retry
-        throw new Error('Document is still processing. Please try selecting it from the vault in a moment.');
+      // If we couldn't get text from vault, fall back to local OCR
+      if (!text) {
+        setProcessingStatus({ 
+          step: 'Processing locally...', 
+          progress: 96, 
+          message: 'Vault processing still in progress. Using local OCR instead...' 
+        });
+        
+        // Use local OCR as fallback
+        text = await extractTextFromFile(file);
+        
+        // Still set vault context so user can benefit from it later
+        // but proceed with local text for now
       }
-      
-      const { text } = await textResponse.json();
       
       // Update state with vault context
       const virtualFile: ProcessedFile = {
